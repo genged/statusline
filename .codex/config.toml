@@ -1,0 +1,3 @@
+[tui]
+status_line = ["current-dir", "git-branch", "model", "reasoning", "branch-changes", "context-used", "context-window-size", "task-progress"]
+status_line_use_colors = true
