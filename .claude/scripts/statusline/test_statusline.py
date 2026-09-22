@@ -2,6 +2,9 @@
 
 Only the statusline subprocess runs Bash. Git is always replaced by a mock;
 these tests never initialize a repository or write Git metadata.
+
+jq is required: without it every payload test skips and the run proves nothing.
+Set STATUSLINE_TESTS_ALLOW_MISSING_JQ=1 to accept a knowingly degraded run.
 """
 
 
@@ -18,6 +21,8 @@ import unittest
 
 SCRIPT = Path(__file__).with_name("statusline.sh")
 BASH = "/bin/bash"
+# jq is commonly installed outside os.defpath on macOS, so resolve it from PATH.
+JQ = shutil.which("jq")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 GIT_MOCK = r'''#!/bin/sh
 printf '%s\n' "$*" >> "$MOCK_GIT_LOG"
@@ -42,6 +47,16 @@ case "$*" in
   *) exit 1 ;;
 esac
 '''
+
+
+def setUpModule():
+    """Fail closed: without jq every payload test skips and the suite proves nothing."""
+    if JQ is None and os.environ.get("STATUSLINE_TESTS_ALLOW_MISSING_JQ") != "1":
+        raise RuntimeError(
+            "jq not found: every payload-parsing test would skip, so this suite would "
+            "report success having verified almost nothing. Install jq, or set "
+            "STATUSLINE_TESTS_ALLOW_MISSING_JQ=1 to accept a knowingly degraded run."
+        )
 
 
 def payload():
@@ -88,14 +103,11 @@ class StatuslineTests(unittest.TestCase):
             "MOCK_GIT_BEHIND": "0",
             "MOCK_GIT_DIRTY": "0",
         })
-        # jq is commonly installed outside os.defpath on macOS.
-        jq = shutil.which("jq")
-        if jq:
-            (self.bin / "jq").symlink_to(jq)
-        self.has_jq = jq is not None
+        if JQ:
+            (self.bin / "jq").symlink_to(JQ)
 
     def run_line(self, data=None, *, raw=None, env=None, needs_jq=True):
-        if needs_jq and not self.has_jq:
+        if needs_jq and JQ is None:
             self.skipTest("jq is not installed")
         process_env = self.env.copy()
         for key, value in (env or {}).items():
@@ -204,6 +216,78 @@ class StatuslineTests(unittest.TestCase):
             "cache_read_input_tokens": 0,
         }
         self.assertNotIn("Context", self.run_line(data))
+
+    def test_token_labels_truncate_and_use_M_only_for_exact_millions(self):
+        for used, size, expected_used, expected_limit in (
+            (1000000, 1000000, "1M", "1M"),
+            (1500000, 2000000, "1500k", "2M"),
+            (999999, 1000000, "999k", "1M"),
+            (1999, 1000000, "1k", "1M"),
+            (999, 200000, "999", "200k"),
+        ):
+            data = payload()
+            data["context_window"]["context_window_size"] = size
+            data["context_window"]["current_usage"] = {
+                "input_tokens": used,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+            }
+            with self.subTest(used=used, size=size):
+                line = self.run_line(data)
+                self.assertIn(f"Context:{expected_used} ", line)
+                self.assertIn(f"%/{expected_limit}]", line)
+
+    def test_bar_fill_is_proportional_to_percentage(self):
+        for percentage in (0, 9, 25, 55, 99, 100):
+            data = payload()
+            data["context_window"]["used_percentage"] = percentage
+            with self.subTest(percentage=percentage):
+                match = re.search(r"\[([\u2588\u2591]*) (\d+)%/", self.run_line(data))
+                self.assertIsNotNone(match)
+                bar, shown = match.group(1), int(match.group(2))
+                self.assertEqual(shown, percentage)
+                self.assertEqual(len(bar), 10, bar)
+                self.assertEqual(bar.count("\u2588"), percentage // 10, bar)
+                self.assertEqual(bar, "\u2588" * (percentage // 10) + "\u2591" * (10 - percentage // 10))
+
+    def test_git_queries_the_payload_directory_not_the_process_directory(self):
+        data = payload()
+        self.run_line(data, env={"MOCK_GIT_MODE": "branch"})
+        self.assertIn("-C /synthetic/project ", self.log.read_text())
+        self.assertNotIn(f"-C {self.root} ", self.log.read_text())
+        self.log.unlink()
+        data.pop("workspace")
+        data["cwd"] = "/synthetic/from-cwd-key"
+        line = self.run_line(data, env={"MOCK_GIT_MODE": "branch"})
+        self.assertIn("-C /synthetic/from-cwd-key ", self.log.read_text())
+        self.assertRegex(line, r":from-cwd-key\b")
+        self.log.unlink()
+        self.run_line(raw="{}", env={"MOCK_GIT_MODE": "branch"})
+        self.assertIn(f"-C {self.root} ", self.log.read_text())
+
+    def test_compact_truncates_long_labels_only_in_compact_mode(self):
+        data = payload()
+        long_model = "Claude Opus 5 Extremely Long Model Name"
+        data["model"]["display_name"] = long_model
+        data["workspace"]["current_dir"] = "/synthetic/" + long_model
+        self.assertIn(long_model, self.run_line(data))
+        line = self.run_line(data, env={"STATUSLINE_COMPACT": "1"})
+        self.assertNotIn(long_model, line)
+        truncated = long_model[:23] + "\u2026"
+        self.assertEqual(len(truncated), 24)
+        self.assertEqual(line.count(truncated), 2, line)
+
+    def test_thresholds_must_be_strictly_ordered(self):
+        for warn, critical in (("90", "90"), ("95", "30"), ("0", "0")):
+            for percentage in (69, 70, 89, 90):
+                with self.subTest(warn=warn, critical=critical, percentage=percentage):
+                    self.assertEqual(
+                        self.context_colors(percentage),
+                        self.context_colors(percentage, {"STATUSLINE_WARN_PCT": warn,
+                                                         "STATUSLINE_CRITICAL_PCT": critical}))
+        self.assertEqual(self.context_colors(100, {"STATUSLINE_WARN_PCT": "0",
+                                                   "STATUSLINE_CRITICAL_PCT": "100"}),
+                         self.context_colors(90))
 
     def test_percentage_clamped_and_floored(self):
         for percentage, expected in ((-12, 0), (0, 0), (25.99, 25), (99.99, 99), (120, 100)):

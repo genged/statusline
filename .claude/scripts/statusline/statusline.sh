@@ -17,17 +17,14 @@ fi
 
 # Remove terminal escape sequences before removing remaining control bytes.
 sanitize() {
-  local text="$1" csi osc control code
+  local text="$1" csi osc
   csi='('$'\033''\[|'$'\302\233'')[0-?]*[ -/]*[@-~]'
   osc='('$'\033'']|'$'\302\235'')'"[^"$'\007\033'"]*"'('$'\007''|'$'\033''\\|'$'\302\234'')'
   while [[ "$text" =~ $osc ]]; do text=${text/"${BASH_REMATCH[0]}"/}; done
   while [[ "$text" =~ $csi ]]; do text=${text/"${BASH_REMATCH[0]}"/}; done
-  # Explicit UTF-8 sequences also work when the caller uses the C locale.
-  for ((code = 128; code <= 159; code++)); do
-    printf -v control '\\302\\%03o' "$code"
-    printf -v control '%b' "$control"
-    text=${text//"$control"/}
-  done
+  # C1 controls as explicit UTF-8, so the C locale is covered too. The trailing
+  # byte range is anchored behind C2, leaving ordinary multibyte text intact.
+  text=${text//$'\302'[$'\200'-$'\237']/}
   text=${text//$'\342\200\250'/}
   text=${text//$'\342\200\251'/}
   text=${text//[[:cntrl:]]/}
@@ -56,16 +53,16 @@ if command -v jq >/dev/null 2>&1; then
     printf '%s' "$input" | jq -j -s '
       def at($path): try getpath($path) catch null;
       def text: if type == "string" then gsub("\u0000"; "") else "" end;
-      def finite: if type == "number" then fabs < 1.7976931348623157e308 else false end;
-      def uint: if finite then . >= 0 and . <= 9007199254740991 and floor == . else false end;
-      if length == 1 and (.[0] | type) == "object" then .[0] else error("invalid payload") end
+      def finite: type == "number" and fabs < 1.7976931348623157e308;
+      def uint: finite and . >= 0 and . <= 9007199254740991 and floor == .;
+      select(length == 1 and (.[0] | type) == "object") | .[0]
       | (at(["workspace", "current_dir"]) | text) as $workspace
       | (at(["cwd"]) | text) as $cwd
       | at(["context_window", "context_window_size"]) as $size
       | at(["context_window", "current_usage"]) as $usage
       | [$usage | at(["input_tokens"]), at(["cache_creation_input_tokens"]), at(["cache_read_input_tokens"])] as $tokens
       | at(["context_window", "used_percentage"]) as $percentage
-      | (if ($size | uint) and $size > 0 and ($tokens | all(.[]; uint)) and ($tokens | add | uint)
+      | (if ($size | uint) and $size > 0 and ($tokens | all(uint)) and ($tokens | add | uint)
          then ($tokens | add) as $used
          | {used: $used, size: $size,
             pct: ((if ($percentage | finite) then $percentage else $used / $size * 100 end) | [0, ., 100] | sort | .[1] | floor)}
@@ -139,11 +136,12 @@ if [ -n "$used_tokens" ] && [ -n "$ctx_size" ] && [ -n "$pct" ]; then
   if [ "$compact" = 1 ]; then
     context="Context ${pct}% · ${used}/${limit}"
   else
-    bar=''
     filled=$((pct / 10))
-    for ((i = 0; i < 10; i++)); do
-      if [ "$i" -lt "$filled" ]; then bar="${bar}█"; else bar="${bar}░"; fi
-    done
+    # Pad with spaces before substituting the glyphs: widths stay correct in
+    # any locale, which slicing the multibyte glyphs directly would not be.
+    printf -v bar '%*s' "$filled" ''
+    printf -v rest '%*s' "$((10 - filled))" ''
+    bar="${bar// /█}${rest// /░}"
     context="Context:${used} [${bar} ${pct}%/${limit}]"
   fi
   # This is a display-only reminder, not Claude Code compaction configuration.
