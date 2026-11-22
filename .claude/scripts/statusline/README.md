@@ -26,7 +26,16 @@ cp statusline.sh ~/.claude/statusline.sh
 chmod +x ~/.claude/statusline.sh
 ```
 
-Merge the `statusLine` entry from `settings.json` into `~/.claude/settings.json`. Keep your existing settings. The example file's spelling is intentional here to match its existing filename.
+Merge this `statusLine` entry into `~/.claude/settings.json`. Keep your existing settings.
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh"
+  }
+}
+```
 
 To enable compact mode and a dirty-worktree marker, use this command in the `statusLine` entry:
 

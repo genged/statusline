@@ -17,24 +17,13 @@ Cost tells you what the session is spending; context tells you how much history 
 
 ## Quick start
 
-```sh
-mkdir -p ~/.claude/scripts/statusline
-cp .claude/scripts/statusline/statusline.sh ~/.claude/scripts/statusline/statusline.sh
-chmod +x ~/.claude/scripts/statusline/statusline.sh
+Ask Claude Code:
+
+```text
+install this status line https://github.com/genged/statusline
 ```
 
-Then add this to `~/.claude/settings.json`:
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "~/.claude/scripts/statusline/statusline.sh"
-  }
-}
-```
-
-Full options — compact mode, color thresholds, a compaction reminder — are in the [script README](.claude/scripts/statusline/README.md).
+Manual setup and full options — compact mode, color thresholds, a compaction reminder — are in the [script README](.claude/scripts/statusline/README.md).
 
 ## Tests
 
